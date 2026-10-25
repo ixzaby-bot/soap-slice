@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { cutAmount, soapHeight, randomSeed, STROKE_LIMIT, smoothCut } from './mechanics';
+import { moveKnife, soapHeight, randomSeed, STROKE_LIMIT, smoothCut } from './mechanics';
 import { ShavingAudio } from './audio';
 import './style.css';
 
@@ -69,8 +69,8 @@ const chips: Chip[] = Array.from({ length: CAPACITY }, () => ({ active: false, p
 const pieces = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ roughness: .72 }), CAPACITY); pieces.instanceMatrix.setUsage(THREE.DynamicDrawUsage); pieces.frustumCulled = false; scene.add(pieces);
 const dummy = new THREE.Object3D(), color = new THREE.Color();
 let cursor = 0, level = 1, progress = 0, free = false, cleared = false, freeTimer = 0;
-let pointer: number | null = null, lastY = 0, stroke = 0, spawnRemainder = 0, lastHaptic = 0;
-let pendingCut = 0, returning = false, touchInput = false, impact = 0;
+let pointer: number | null = null, lastY = 0, spawnRemainder = 0, lastHaptic = 0;
+let travel = 0, targetTravel = 0, direction = 0, touchInput = false, impact = 0;
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 function emit(amount: number, celebration = false) {
   const palette = palettes[(level - 1) % 3];
@@ -94,11 +94,11 @@ function updateUI() { const percent = Math.round(progress * 100); $('percent').i
 function stop(cancel = true) {
   const id = pointer; pointer = null;
   if (id !== null && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
-  if (cancel) { pendingCut = 0; returning = false; }
+  if (cancel) targetTravel = travel;
   audio.stop(); if (touchInput && navigator.vibrate) navigator.vibrate(0);
 }
 function reset(advance = false) {
-  stop(); if (advance) level++; progress = 0; cleared = false; freeTimer = 0; stroke = 0; spawnRemainder = 0; impact = 0;
+  stop(); if (advance) level++; progress = 0; cleared = false; freeTimer = 0; travel = targetTravel = direction = 0; spawnRemainder = 0; impact = 0;
   chips.forEach(p => p.active = false); reward.visible = false; knife.visible = true; $('complete').hidden = true; $('hint').hidden = false;
   $('level').textContent = `LEVEL ${String(level).padStart(2, '0')}`; $('soap-name').textContent = `${String((level - 1) % 3 + 1).padStart(2, '0')} — ${palettes[(level - 1) % 3].name}`;
   texture(level); updateSoap(); knife.position.set(0, soapHeight(0) + .035, -1.12); updateUI();
@@ -107,16 +107,18 @@ function finish() { cleared = true; stop(); if (free) { freeTimer = .5; return; 
 canvas.addEventListener('pointerdown', e => {
   if (pointer !== null || cleared || (e.pointerType === 'mouse' && e.button !== 0)) return;
   e.preventDefault(); unlockAudio();
-  // Settle only the previous stroke's small smoothing tail before a new gesture.
-  if (pendingCut > 0) { progress = Math.min(1, progress + pendingCut); pendingCut = 0; updateSoap(); updateUI(); if (progress >= 1 - 1e-8) { finish(); return; } }
-  pointer = e.pointerId; canvas.setPointerCapture(e.pointerId); lastY = e.clientY; stroke = 0;
-  touchInput = e.pointerType === 'touch'; returning = knife.position.z > -1.10;
+  pointer = e.pointerId; canvas.setPointerCapture(e.pointerId); lastY = e.clientY;
+  touchInput = e.pointerType === 'touch';
 });
 canvas.addEventListener('pointermove', e => {
   if (pointer !== e.pointerId || cleared) return;
   const delta = e.clientY - lastY; lastY = e.clientY;
-  const amount = cutAmount(delta, host.clientHeight, stroke, progress + pendingCut);
-  stroke += amount; pendingCut += amount;
+  if (delta === 0) return;
+  const nextDirection = Math.sign(delta);
+  // Reverse immediately without consuming a queued forward smoothing tail.
+  if (nextDirection !== direction) { targetTravel = travel; audio.stop(); }
+  direction = nextDirection;
+  targetTravel = moveKnife(targetTravel, delta, host.clientHeight);
 });
 canvas.addEventListener('pointerup', e => { if (e.pointerId === pointer) stop(false); });
 for (const event of ['pointercancel', 'lostpointercapture']) canvas.addEventListener(event, e => { if ((e as PointerEvent).pointerId === pointer) stop(); });
@@ -134,29 +136,30 @@ function frame(now: number) {
   sampleTime += raw; frames++;
   if (sampleTime > 3) { const fps = frames / sampleTime; if (fps < 44) { budget = Math.max(100, budget - 60); renderer.setPixelRatio(Math.max(1, renderer.getPixelRatio() - .25)); resize(); } else if (fps > 57) budget = Math.min(CAPACITY, budget + 20); sampleTime = 0; frames = 0; }
   if (freeTimer > 0) { freeTimer -= dt; if (freeTimer <= 0) reset(true); }
-  if (returning) {
-    knife.position.z = THREE.MathUtils.lerp(knife.position.z, -1.12, 1 - Math.exp(-35 * dt));
-    if (knife.position.z < -1.10) { knife.position.z = -1.12; returning = false; }
-  }
-  const amount = returning ? 0 : smoothCut(pendingCut, dt);
+  const difference = targetTravel - travel;
+  const step = Math.sign(difference) * smoothCut(Math.abs(difference), dt);
+  const returning = step < 0;
+  travel = Math.min(1, Math.max(0, travel + step));
+  const z = -1.12 + travel * 2.24;
+  const amount = Math.min(1 - progress, Math.max(0, step) * STROKE_LIMIT);
   if (amount > 0 && !cleared) {
-    pendingCut = Math.max(0, pendingCut - amount); progress = Math.min(1, progress + amount);
+    progress = Math.min(1, progress + amount);
     updateSoap(); updateUI();
-    const z = -1.12 + Math.min(1, (stroke - pendingCut) / STROKE_LIMIT) * 2.24;
     const oldZ = knife.position.z;
     const count = Math.floor(spawnRemainder + amount * 1550); spawnRemainder += amount * 1550 - count;
     knife.position.y = soapHeight(progress) + .035;
     for (let i = 0; i < count; i++) { knife.position.z = THREE.MathUtils.lerp(oldZ, z, (i + 1) / count); emit(1); }
     knife.position.z = z; impact = Math.min(1, amount / Math.max(dt, .001) * 8);
-    audio.scrape(amount / Math.max(dt, .001) * host.clientHeight / .32);
+    audio.scrape(amount / Math.max(dt, .001) * host.clientHeight / .32, amount);
     if (touchInput && pointer !== null && now - lastHaptic > 95 && navigator.vibrate) { navigator.vibrate(8); lastHaptic = now; }
     if (progress >= 1 - 1e-8) { progress = 1; updateUI(); finish(); }
   }
+  knife.position.z = z;
+  if (returning) audio.stop();
   impact *= Math.exp(-15 * dt);
   // Tiny vertical pressure feedback, with no shaking for reduced-motion users.
   knife.rotation.x = reducedMotion ? 0 : Math.sin(now * .055) * .012 * impact;
-  if (returning) knife.position.y = soapHeight(progress) + .18;
-  else knife.position.y = THREE.MathUtils.lerp(knife.position.y, soapHeight(progress) + .035, 1 - Math.exp(-26 * dt));
+  knife.position.y = THREE.MathUtils.lerp(knife.position.y, soapHeight(progress) + (returning ? .18 : .035), 1 - Math.exp(-26 * dt));
   for (let i = 0; i < CAPACITY; i++) {
     const p = chips[i]; if (p.active) {
       p.life -= dt; if (p.life <= 0) p.active = false;

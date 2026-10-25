@@ -1,4 +1,7 @@
 export const STROKE_LIMIT = 0.105;
+export function moveKnife(position: number, deltaY: number, viewport: number): number {
+  return Math.min(1, Math.max(0, position + deltaY / Math.max(160, viewport) * .32 / STROKE_LIMIT));
+}
 // Frame-rate independent smoothing; finish the tiny tail instead of cutting forever.
 export function smoothCut(pending: number, dt: number): number {
   return pending < .00008 ? pending : pending * (1 - Math.exp(-26 * Math.max(0, dt)));

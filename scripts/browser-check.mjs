@@ -23,7 +23,8 @@ try {
   await page.goto(process.env.GAME_URL || 'http://127.0.0.1:5173');
   await page.waitForTimeout(1000);
   await page.screenshot({ path: 'mobile-preview.png' });
-  const stroke = async () => { await page.mouse.move(190,270); await page.mouse.down(); await page.mouse.move(190,590,{steps:22}); await page.mouse.up(); await page.waitForTimeout(180); };
+  const returnKnife = async () => { await page.mouse.move(190,590); await page.mouse.down(); await page.mouse.move(190,270,{steps:20}); await page.waitForTimeout(300); await page.mouse.up(); };
+  const stroke = async () => { await returnKnife(); await page.mouse.move(190,270); await page.mouse.down(); await page.mouse.move(190,590,{steps:22}); await page.waitForTimeout(300); await page.mouse.up(); };
   await page.mouse.move(190,350); await page.mouse.down(); await page.waitForTimeout(150); await page.mouse.up();
   assert.equal(await page.locator('#percent').innerText(), '0%');
   await stroke();
@@ -31,6 +32,10 @@ try {
   assert.equal(await page.locator('#sound').getAttribute('aria-pressed'), 'true');
   const peak = () => page.evaluate(() => { const values = new Float32Array(window.__analyser.fftSize); window.__analyser.getFloatTimeDomainData(values); return Math.max(...values.map(Math.abs)); });
   assert.equal(await page.evaluate(()=>window.__audio.state), 'running');
+  const afterFirstCut = await page.locator('#percent').innerText();
+  await page.mouse.move(190,270); await page.mouse.down(); await page.mouse.move(190,590,{steps:15}); await page.mouse.up(); await page.waitForTimeout(300);
+  assert.equal(await page.locator('#percent').innerText(),afterFirstCut,'Re-grabbing must not automatically return the knife');
+  await returnKnife(); assert.equal(await page.locator('#percent').innerText(),afterFirstCut,'Upward return must not cut'); assert.ok(await peak()<.001);
   await page.mouse.move(190,270); await page.mouse.down();
   let output = 0;
   for (let y=280;y<=500;y+=20) { await page.mouse.move(190,y); await page.waitForTimeout(30); output = Math.max(output, await peak()); }
@@ -44,6 +49,14 @@ try {
   assert.equal(await page.evaluate(()=>window.__audio.state),'running');
   await page.locator('#reset').click();
   console.log('PASS: audio output, silence after cutting, mute, and resume after suspension');
+  await page.mouse.move(190,270); await page.mouse.down(); await page.mouse.move(190,590,{steps:20}); await page.waitForTimeout(300);
+  const beforeReturn = await page.locator('#percent').innerText();
+  await page.mouse.move(190,270,{steps:20}); await page.waitForTimeout(300);
+  assert.equal(await page.locator('#percent').innerText(),beforeReturn); assert.ok(await peak()<.001);
+  await page.mouse.move(190,590,{steps:20}); await page.waitForTimeout(300); await page.mouse.up();
+  assert.ok(parseInt(await page.locator('#percent').innerText())>parseInt(beforeReturn));
+  console.log('PASS: down/up/down without lifting; silent return; no automatic return on re-grab');
+  await page.locator('#reset').click();
   for(let i=0;i<10;i++) await stroke();
   await page.locator('#complete').waitFor({state:'visible'});
   assert.equal(await page.locator('#percent').innerText(), '100%');
