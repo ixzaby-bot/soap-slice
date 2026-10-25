@@ -1,12 +1,20 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { cutAmount, soapHeight, randomSeed, STROKE_LIMIT } from './mechanics';
+import { cutAmount, soapHeight, randomSeed, STROKE_LIMIT, smoothCut } from './mechanics';
 import { ShavingAudio } from './audio';
 import './style.css';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>('canvas'), host = $('scene');
 const audio = new ShavingAudio();
+const notice = document.createElement('p'); notice.id = 'feedback'; notice.setAttribute('role', 'status'); document.querySelector('footer')!.prepend(notice);
+function unlockAudio(preview = false) {
+  if (!audio.enabled) return;
+  void audio.unlock().then(() => {
+    if (audio.enabled) { notice.textContent = ''; if (preview) audio.preview(); }
+  }).catch(() => { notice.textContent = '音を開始できません。「音」を押して再試行してください。'; });
+}
+$('sound').setAttribute('aria-pressed', 'true'); $('sound-label').textContent = '音 ON';
 const palettes = [
   { name: 'ROSE MARBLE', dark: '#b83f60', light: '#f7b5bf', stripe: '#ffe3d8' },
   { name: 'MATCHA CLOUD', dark: '#599485', light: '#b9dfbb', stripe: '#f1eed2' },
@@ -20,7 +28,7 @@ renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadow
 renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.setClearColor(0xf4eee8, 0);
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(34, 1, .1, 60);
-camera.position.set(5.7, 7.3, 8.8); camera.lookAt(0, .45, 0);
+camera.position.set(5.7, 7.3, 8.8); camera.lookAt(.22, .45, 0);
 scene.add(new THREE.HemisphereLight(0xfffbf1, 0xb8a2a3, 2.6));
 const sun = new THREE.DirectionalLight(0xfff7eb, 3.5); sun.position.set(-3, 8, 4); sun.castShadow = true;
 sun.shadow.mapSize.set(1024, 1024); sun.shadow.camera.left = -5; sun.shadow.camera.right = 5; sun.shadow.camera.top = 5; sun.shadow.camera.bottom = -5; sun.shadow.normalBias = .035; scene.add(sun);
@@ -61,14 +69,16 @@ const chips: Chip[] = Array.from({ length: CAPACITY }, () => ({ active: false, p
 const pieces = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ roughness: .72 }), CAPACITY); pieces.instanceMatrix.setUsage(THREE.DynamicDrawUsage); pieces.frustumCulled = false; scene.add(pieces);
 const dummy = new THREE.Object3D(), color = new THREE.Color();
 let cursor = 0, level = 1, progress = 0, free = false, cleared = false, freeTimer = 0;
-let pointer: number | null = null, lastY = 0, lastTime = 0, stroke = 0, targetZ = -1.12, spawnRemainder = 0, lastHaptic = 0;
+let pointer: number | null = null, lastY = 0, stroke = 0, spawnRemainder = 0, lastHaptic = 0;
+let pendingCut = 0, returning = false, touchInput = false, impact = 0;
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 function emit(amount: number, celebration = false) {
   const palette = palettes[(level - 1) % 3];
   for (let n = 0; n < amount; n++) {
     cursor = (cursor + 1) % budget; const p = chips[cursor];
-    p.active = true; p.confetti = celebration; p.size = celebration ? .07 + Math.random() * .06 : .045 + Math.random() * .075;
+    p.active = true; p.confetti = celebration; p.size = celebration ? .07 + Math.random() * .06 : Math.random() < .22 ? .21 + Math.random() * .09 : .10 + Math.random() * .09;
     p.p.set((Math.random() - .5) * 2.28, celebration ? 1 + Math.random() : knife.position.y + .045, celebration ? (Math.random() - .5) * 2 : knife.position.z + .035);
-    p.v.set((Math.random() - .5) * 2.1, celebration ? 3 + Math.random() * 3 : .7 + Math.random() * 1.6, celebration ? (Math.random() - .5) * 3 : 1.2 + Math.random() * 1.9);
+    p.v.set((Math.random() - .5) * 3.1, celebration ? 3 + Math.random() * 3 : 1.2 + Math.random() * 2.2, celebration ? (Math.random() - .5) * 3 : 2 + Math.random() * 2.4);
     p.r.set(Math.random() * 6, Math.random() * 6, Math.random() * 6); p.spin.set(Math.random() * 8 - 4, Math.random() * 8 - 4, Math.random() * 8 - 4);
     p.maxLife = p.life = celebration ? 3.5 : 3 + Math.random() * 2;
     color.set(celebration ? ['#dbb564', '#f7c9d0', '#b0c8a5', '#b8a3ce'][n % 4] : Math.random() < .3 ? palette.stripe : Math.random() < .5 ? palette.light : palette.dark);
@@ -81,9 +91,14 @@ for (let i = 0; i < 10; i++) { const a = Math.PI / 2 + i * Math.PI / 5, r = i % 
 const reward = new THREE.Mesh(new THREE.ExtrudeGeometry(starShape, { depth: .15, bevelEnabled: true, bevelSize: .055, bevelThickness: .055, bevelSegments: 3, steps: 1 }), new THREE.MeshStandardMaterial({ color: '#eabb50', metalness: .65, roughness: .23 })); reward.visible = false; reward.castShadow = true; scene.add(reward);
 function updateSoap() { const h = soapHeight(progress); soap.scale.y = h; soap.position.y = h / 2 + .02; top.position.y = h + .022; if (marble) { marble.offset.y = progress * 1.7; marble.rotation = Math.sin(progress * 8) * .15; } }
 function updateUI() { const percent = Math.round(progress * 100); $('percent').innerHTML = `${percent}<span>%</span>`; $('progress').style.width = `${percent}%`; document.querySelector('.track')!.setAttribute('aria-valuenow', String(percent)); }
-function stop() { if (pointer !== null && canvas.hasPointerCapture(pointer)) canvas.releasePointerCapture(pointer); pointer = null; audio.stop(); }
+function stop(cancel = true) {
+  const id = pointer; pointer = null;
+  if (id !== null && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
+  if (cancel) { pendingCut = 0; returning = false; }
+  audio.stop(); if (touchInput && navigator.vibrate) navigator.vibrate(0);
+}
 function reset(advance = false) {
-  stop(); if (advance) level++; progress = 0; cleared = false; freeTimer = 0; stroke = 0; spawnRemainder = 0; targetZ = -1.12;
+  stop(); if (advance) level++; progress = 0; cleared = false; freeTimer = 0; stroke = 0; spawnRemainder = 0; impact = 0;
   chips.forEach(p => p.active = false); reward.visible = false; knife.visible = true; $('complete').hidden = true; $('hint').hidden = false;
   $('level').textContent = `LEVEL ${String(level).padStart(2, '0')}`; $('soap-name').textContent = `${String((level - 1) % 3 + 1).padStart(2, '0')} — ${palettes[(level - 1) % 3].name}`;
   texture(level); updateSoap(); knife.position.set(0, soapHeight(0) + .035, -1.12); updateUI();
@@ -91,34 +106,27 @@ function reset(advance = false) {
 function finish() { cleared = true; stop(); if (free) { freeTimer = .5; return; } knife.visible = false; reward.visible = true; emit(100, true); $('complete').hidden = false; $('hint').hidden = true; }
 canvas.addEventListener('pointerdown', e => {
   if (pointer !== null || cleared || (e.pointerType === 'mouse' && e.button !== 0)) return;
-  e.preventDefault(); pointer = e.pointerId; canvas.setPointerCapture(e.pointerId); lastY = e.clientY; lastTime = performance.now(); stroke = 0; targetZ = -1.12;
-  // A new stroke starts at the back edge; both blade and emission share this position.
-  knife.position.z = targetZ; void audio.unlock().catch(() => {});
+  e.preventDefault(); unlockAudio();
+  // Settle only the previous stroke's small smoothing tail before a new gesture.
+  if (pendingCut > 0) { progress = Math.min(1, progress + pendingCut); pendingCut = 0; updateSoap(); updateUI(); if (progress >= 1 - 1e-8) { finish(); return; } }
+  pointer = e.pointerId; canvas.setPointerCapture(e.pointerId); lastY = e.clientY; stroke = 0;
+  touchInput = e.pointerType === 'touch'; returning = knife.position.z > -1.10;
 });
 canvas.addEventListener('pointermove', e => {
   if (pointer !== e.pointerId || cleared) return;
-  const now = performance.now(), delta = e.clientY - lastY, elapsed = Math.max(8, now - lastTime); lastY = e.clientY; lastTime = now;
-  const amount = cutAmount(delta, host.clientHeight, stroke, progress);
-  if (amount <= 0) { audio.stop(); return; }
-  stroke += amount; progress = Math.min(1, progress + amount); targetZ = -1.12 + Math.min(1, stroke / STROKE_LIMIT) * 2.24;
-  updateSoap(); updateUI();
-  // Sample the entire travelled contact line so fast pointer events still leave a continuous shower.
-  const oldZ = knife.position.z; const count = Math.floor(spawnRemainder + amount * 1350); spawnRemainder = spawnRemainder + amount * 1350 - count;
-  knife.position.y = soapHeight(progress) + .035;
-  for (let i = 0; i < count; i++) { knife.position.z = THREE.MathUtils.lerp(oldZ, targetZ, (i + 1) / count); emit(1); }
-  knife.position.z = targetZ;
-  audio.scrape(delta / elapsed * 1000);
-  if (now - lastHaptic > 85 && navigator.vibrate) { navigator.vibrate(5); lastHaptic = now; }
-  if (progress >= 1 - 1e-8) { progress = 1; updateUI(); finish(); }
+  const delta = e.clientY - lastY; lastY = e.clientY;
+  const amount = cutAmount(delta, host.clientHeight, stroke, progress + pendingCut);
+  stroke += amount; pendingCut += amount;
 });
-for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) canvas.addEventListener(event, e => { if ((e as PointerEvent).pointerId === pointer) stop(); });
-window.addEventListener('pointerup', stop); window.addEventListener('blur', stop);
+canvas.addEventListener('pointerup', e => { if (e.pointerId === pointer) stop(false); });
+for (const event of ['pointercancel', 'lostpointercapture']) canvas.addEventListener(event, e => { if ((e as PointerEvent).pointerId === pointer) stop(); });
+window.addEventListener('pointerup', e => { if (e.pointerId === pointer) stop(false); }); window.addEventListener('blur', () => stop());
 document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 $('reset').onclick = () => reset(); $('next').onclick = () => reset(true);
-$('sound').onclick = () => { audio.enabled = !audio.enabled; $('sound').setAttribute('aria-pressed', String(audio.enabled)); $('sound-label').textContent = `音 ${audio.enabled ? 'ON' : 'OFF'}`; if (audio.enabled) void audio.unlock().catch(() => {}); else audio.stop(); };
+$('sound').onclick = () => { audio.enabled = notice.textContent ? true : !audio.enabled; $('sound').setAttribute('aria-pressed', String(audio.enabled)); $('sound-label').textContent = `音 ${audio.enabled ? 'ON' : 'OFF'}`; if (audio.enabled) unlockAudio(true); else audio.stop(); };
 $('free').onclick = () => { free = !free; $('free').setAttribute('aria-pressed', String(free)); $('mode-label').textContent = free ? 'おわりのない、ひと休み。' : 'ゆっくり、ひと削り。'; reset(); };
-function resize() { const w = host.clientWidth, h = host.clientHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.fov = camera.aspect < .8 ? 42 : 34; camera.updateProjectionMatrix(); }
+function resize() { const w = host.clientWidth, h = host.clientHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.fov = camera.aspect < .8 ? 36 : 28; camera.updateProjectionMatrix(); }
 new ResizeObserver(resize).observe(host); resize(); reset();
 let previous = performance.now(), sampleTime = 0, frames = 0;
 function frame(now: number) {
@@ -126,7 +134,29 @@ function frame(now: number) {
   sampleTime += raw; frames++;
   if (sampleTime > 3) { const fps = frames / sampleTime; if (fps < 44) { budget = Math.max(100, budget - 60); renderer.setPixelRatio(Math.max(1, renderer.getPixelRatio() - .25)); resize(); } else if (fps > 57) budget = Math.min(CAPACITY, budget + 20); sampleTime = 0; frames = 0; }
   if (freeTimer > 0) { freeTimer -= dt; if (freeTimer <= 0) reset(true); }
-  knife.position.y = THREE.MathUtils.lerp(knife.position.y, soapHeight(progress) + .035, 1 - Math.exp(-22 * dt));
+  if (returning) {
+    knife.position.z = THREE.MathUtils.lerp(knife.position.z, -1.12, 1 - Math.exp(-35 * dt));
+    if (knife.position.z < -1.10) { knife.position.z = -1.12; returning = false; }
+  }
+  const amount = returning ? 0 : smoothCut(pendingCut, dt);
+  if (amount > 0 && !cleared) {
+    pendingCut = Math.max(0, pendingCut - amount); progress = Math.min(1, progress + amount);
+    updateSoap(); updateUI();
+    const z = -1.12 + Math.min(1, (stroke - pendingCut) / STROKE_LIMIT) * 2.24;
+    const oldZ = knife.position.z;
+    const count = Math.floor(spawnRemainder + amount * 1550); spawnRemainder += amount * 1550 - count;
+    knife.position.y = soapHeight(progress) + .035;
+    for (let i = 0; i < count; i++) { knife.position.z = THREE.MathUtils.lerp(oldZ, z, (i + 1) / count); emit(1); }
+    knife.position.z = z; impact = Math.min(1, amount / Math.max(dt, .001) * 8);
+    audio.scrape(amount / Math.max(dt, .001) * host.clientHeight / .32);
+    if (touchInput && pointer !== null && now - lastHaptic > 95 && navigator.vibrate) { navigator.vibrate(8); lastHaptic = now; }
+    if (progress >= 1 - 1e-8) { progress = 1; updateUI(); finish(); }
+  }
+  impact *= Math.exp(-15 * dt);
+  // Tiny vertical pressure feedback, with no shaking for reduced-motion users.
+  knife.rotation.x = reducedMotion ? 0 : Math.sin(now * .055) * .012 * impact;
+  if (returning) knife.position.y = soapHeight(progress) + .18;
+  else knife.position.y = THREE.MathUtils.lerp(knife.position.y, soapHeight(progress) + .035, 1 - Math.exp(-26 * dt));
   for (let i = 0; i < CAPACITY; i++) {
     const p = chips[i]; if (p.active) {
       p.life -= dt; if (p.life <= 0) p.active = false;
@@ -146,4 +176,11 @@ function frame(now: number) {
   renderer.render(scene, camera);
 }
 requestAnimationFrame(frame);
-if (import.meta.env.PROD && 'serviceWorker' in navigator) window.addEventListener('load', () => { navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {}); });
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  const hadController = !!navigator.serviceWorker.controller;
+  let refreshing = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !refreshing) { refreshing = true; window.location.reload(); }
+  });
+  window.addEventListener('load', () => { navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).then(r => r.update()).catch(() => {}); });
+}

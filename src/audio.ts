@@ -1,5 +1,5 @@
 export class ShavingAudio {
-  enabled = false;
+  enabled = true;
   private context?: AudioContext;
   private gain?: GainNode;
   private filter?: BiquadFilterNode;
@@ -7,8 +7,12 @@ export class ShavingAudio {
     if (!this.enabled) return;
     if (!this.context) {
       const Audio = window.AudioContext || (window as unknown as {webkitAudioContext: typeof AudioContext}).webkitAudioContext;
-      if (!Audio) return;
-      this.context = new Audio();
+      if (!Audio) throw new Error('Audio is unavailable');
+      // Safari normally treats Web Audio as ambient audio. Request media playback
+      // when available, so the mute switch does not silently suppress the game.
+      const session = (navigator as Navigator & { audioSession?: { type: string } }).audioSession;
+      if (session) { try { session.type = 'playback'; } catch { /* Optional API. */ } }
+      this.context = new Audio({ latencyHint: 'interactive' });
       const ctx = this.context;
       const buffer = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
       const data = buffer.getChannelData(0);
@@ -17,17 +21,21 @@ export class ShavingAudio {
       const source = ctx.createBufferSource(); source.buffer = buffer; source.loop = true;
       this.filter = ctx.createBiquadFilter(); this.filter.type = 'bandpass'; this.filter.Q.value = .65;
       this.gain = ctx.createGain(); this.gain.gain.value = 0;
-      source.connect(this.filter).connect(this.gain).connect(ctx.destination); source.start();
+      const limiter = ctx.createDynamicsCompressor(); limiter.threshold.value = -12; limiter.ratio.value = 5;
+      source.connect(this.filter).connect(this.gain).connect(limiter).connect(ctx.destination); source.start();
     }
-    if (this.context.state === 'suspended') await this.context.resume();
+    // iOS can also enter "interrupted" after backgrounding or a phone call.
+    if (this.context.state !== 'running') await this.context.resume();
+    if (this.context.state !== 'running') throw new Error('Audio did not resume');
   }
   scrape(speed: number) {
     if (!this.enabled || !this.context || !this.gain || !this.filter) return;
     const t = this.context.currentTime, v = Math.min(1, speed / 900);
-    this.filter.frequency.setTargetAtTime(1000 + v * 3300, t, .015);
+    this.filter.frequency.setTargetAtTime(850 + v * 2200, t, .015);
     this.gain.gain.cancelScheduledValues(t);
-    this.gain.gain.setTargetAtTime(.035 + v * .13, t, .008);
+    this.gain.gain.setTargetAtTime(.13 + v * .32, t, .008);
     this.gain.gain.setTargetAtTime(0, t + .035, .018);
   }
+  preview() { this.scrape(500); }
   stop() { if (this.context && this.gain) { const t = this.context.currentTime; this.gain.gain.cancelScheduledValues(t); this.gain.gain.setTargetAtTime(0, t, .012); } }
 }
